@@ -1,3 +1,19 @@
+//! # Parsing ISO 8601 time interval into chrono DateTime
+//!
+//! It is a small addition to the [`chrono`] crate, parsing ISO 8601 time interval [^wiki] into
+//! [`IsoInterval`] which contains a pair of [`DateTime`] objects, that respectively mark the
+//! beginning and end of the interval.
+//!
+//! [^wiki]: <https://en.wikipedia.org/wiki/ISO_8601#Time_intervals>
+//!
+//! This utility is missing in `chrono` possibly due to the fuzziness of duration, which can be
+//! specified against year and month, so the time passed is inherently not absolute. Intervals, on
+//! the other hand, are absolute in that regard, because when a starting or end point is fixed, the
+//! exact number of seconds passed can be calculated.
+//!
+//! The dates, as parsed, are in [`chrono::FixedOffset`] time zone, and can be switched out
+//! by calling [`IsoInterval::with_time_zone`].
+
 use std::{
     ops::{Add, Sub},
     str::FromStr,
@@ -15,21 +31,28 @@ use nom::{
 };
 use thiserror::Error;
 
+/// An interval in time.
 pub struct IsoInterval<Tz: TimeZone> {
+    /// The beginning of the interval
     pub from: DateTime<Tz>,
+
+    /// The end of the interval
     pub to: DateTime<Tz>,
 }
 
 impl<Tz: TimeZone> IsoInterval<Tz> {
+    /// Constructs an interval from the two ends
     pub fn from_range(from: DateTime<Tz>, to: DateTime<Tz>) -> Self {
         IsoInterval { from, to }
     }
 
-    fn from_duration(from: DateTime<Tz>, duration: IsoDuration) -> Self {
+    /// Constructs an interval from the beginning and the length of the duration
+    pub fn from_duration(from: DateTime<Tz>, duration: IsoDuration) -> Self {
         let to = from.clone() + &duration;
         Self::from_range(from, to)
     }
 
+    /// Convert the interval to a different time zone
     pub fn with_time_zone<TzTo: TimeZone>(&self, tz: &TzTo) -> IsoInterval<TzTo> {
         IsoInterval::from_range(self.from.with_timezone(tz), self.to.with_timezone(tz))
     }
@@ -61,13 +84,18 @@ impl FromStr for IsoInterval<FixedOffset> {
     }
 }
 
+/// Error of parsing
 #[derive(Error, Debug)]
 #[error("{msg}")]
 pub struct ParseIntervalError {
     msg: String,
 }
 
-struct IsoDuration {
+/// Duration specified according to ISO 8601, in years, months, days, hours, minutes, and seconds.
+///
+/// This instance of duration is not an absolute measurement of time, due to the fact that months
+/// and years can have different number of days.
+pub struct IsoDuration {
     year: i64,
     month: i64,
     day: i64,
@@ -76,7 +104,8 @@ struct IsoDuration {
     second: i64,
 }
 
-trait IsoDurationAddable {
+/// Things that can take durations for adding and subtracting.
+pub trait IsoDurationAddable {
     fn add(value: Self, duration: IsoDuration) -> Self;
 }
 
@@ -186,7 +215,7 @@ fn parse_i64(i: &str) -> IResult<&str, i64> {
     })(i)
 }
 
-pub fn or_default<I: Clone, O: Clone, E: ParseError<I>, F>(
+fn or_default<I: Clone, O: Clone, E: ParseError<I>, F>(
     val: O,
     mut parser: F,
 ) -> impl FnMut(I) -> IResult<I, O, E>
