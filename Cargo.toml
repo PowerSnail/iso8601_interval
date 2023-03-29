@@ -7,7 +7,7 @@ authors = [
 ]
 description = "Parses ISO8601 time intervals."
 homepage = "https://github.com/PowerSnail/iso8601_interval"
-repository = "repository"
+repository = "https://github.com/PowerSnail/iso8601_interval"
 readme = "README.md"
 license = "MIT"
 
