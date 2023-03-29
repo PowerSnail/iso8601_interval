@@ -32,6 +32,7 @@ use nom::{
 use thiserror::Error;
 
 /// An interval in time.
+#[derive(Debug)]
 pub struct IsoInterval<Tz: TimeZone> {
     /// The beginning of the interval
     pub from: DateTime<Tz>,
@@ -55,6 +56,11 @@ impl<Tz: TimeZone> IsoInterval<Tz> {
     /// Convert the interval to a different time zone
     pub fn with_time_zone<TzTo: TimeZone>(&self, tz: &TzTo) -> IsoInterval<TzTo> {
         IsoInterval::from_range(self.from.with_timezone(tz), self.to.with_timezone(tz))
+    }
+
+    /// The real and absolute duration marked by this interval
+    pub fn duration(&self) -> chrono::Duration {
+        self.to.clone() - self.from.clone()
     }
 }
 
@@ -95,6 +101,7 @@ pub struct ParseIntervalError {
 ///
 /// This instance of duration is not an absolute measurement of time, due to the fact that months
 /// and years can have different number of days.
+#[derive(Debug)]
 pub struct IsoDuration {
     year: i64,
     month: i64,
