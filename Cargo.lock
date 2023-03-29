@@ -135,7 +135,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "iso_interval"
+name = "iso8601_interval"
 version = "0.1.0"
 dependencies = [
  "chrono",
