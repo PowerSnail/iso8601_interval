@@ -15,6 +15,8 @@
 //! by calling [`IsoInterval::with_time_zone`].
 
 use std::{
+    fmt,
+    fmt::{Display, Formatter},
     ops::{Add, Sub},
     str::FromStr,
 };
@@ -26,6 +28,7 @@ use nom::{
     character::complete::{char, digit1},
     combinator::{map, map_res, opt, recognize},
     error::ParseError,
+    number::complete::recognize_float_parts,
     sequence::{pair, preceded, separated_pair, terminated, tuple},
     IResult, Parser,
 };
@@ -98,10 +101,13 @@ pub struct ParseIntervalError {
 }
 
 /// Duration specified according to ISO 8601, in years, months, days, hours, minutes, and seconds.
+/// Seconds field can have fractional part, up to nanosecond precision.
 ///
 /// This instance of duration is not an absolute measurement of time, due to the fact that months
 /// and years can have different number of days.
-#[derive(Debug)]
+/// Restriction: Only the seconds field can have fraction, but no other field can. ISO 8601 allows any field to have fraction, if it is last.
+
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct IsoDuration {
     year: i64,
     month: i64,
@@ -109,6 +115,98 @@ pub struct IsoDuration {
     hour: i64,
     minute: i64,
     second: i64,
+    nanos: i64,
+}
+
+#[allow(dead_code)]
+impl IsoDuration {
+    fn new(
+        year: i64,
+        month: i64,
+        day: i64,
+        hour: i64,
+        minute: i64,
+        second: i64,
+        nanos: i64,
+    ) -> Self {
+        IsoDuration {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanos,
+        }
+    }
+}
+
+impl Display for IsoDuration {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        //write!(f, "{}", self.)
+        //todo: handle case all fields zero -> PD0
+
+        if self == &IsoDuration::default() {
+            write!(f, "PT0S")?; // an arbitrary choice from among the many ways to represent 0 duration.
+        } else {
+            write!(f, "P")?;
+            if self.year != 0 {
+                write!(f, "{}Y", self.year)?;
+            };
+            if self.month != 0 {
+                write!(f, "{}M", self.month)?;
+            };
+            if self.day != 0 {
+                write!(f, "{}D", self.day)?;
+            };
+            if self.hour != 0 || self.minute != 0 || self.second != 0 || self.nanos != 0 {
+                write!(f, "T")?;
+                if self.hour != 0 {
+                    write!(f, "{}H", self.hour)?;
+                };
+                if self.minute != 0 {
+                    write!(f, "{}M", self.minute)?;
+                };
+                if self.second != 0 || self.nanos != 0 {
+                    if self.nanos != 0 {
+                        // want to display nanos as fraction after seconds, must fix it so nanos portion doesn't display its own leading negative sign
+                        if self.second >= 0 && self.nanos >= 0 {
+                            write!(f, "{}.{:09}S", self.second, self.nanos)?;
+                        } else if self.second < 0 && self.nanos < 0 {
+                            write!(f, "{}.{:09}S", self.second, -self.nanos)?;
+                        } else {
+                            // mixed signs -- rely on bigint arithmetic to borrow and carry between the 2 variables
+                            let real_nanos: i128 =
+                                (self.second * 1_000_000_000 + self.nanos).into();
+                            if real_nanos < 0 {
+                                let real_second = real_nanos / 1_000_000_000;
+                                if real_second == 0 {
+                                    write!(f, "-0.{:09}S", -real_nanos % 1_000_000_000)?;
+                                } else {
+                                    write!(
+                                        f,
+                                        "{}.{:09}S",
+                                        real_second,
+                                        -real_nanos % 1_000_000_000
+                                    )?;
+                                }
+                            } else {
+                                write!(
+                                    f,
+                                    "{}.{:09}S",
+                                    real_nanos / 1_000_000_000,
+                                    real_nanos % 1_000_000_000
+                                )?;
+                            }
+                        }
+                    } else {
+                        write!(f, "{}S", self.second)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Things that can take durations for adding and subtracting.
@@ -133,6 +231,7 @@ impl<Tz: TimeZone> Add<&IsoDuration> for DateTime<Tz> {
             date = date - Days::new(-rhs.day as u64);
         }
         date = date + Duration::seconds(rhs.second + rhs.minute * 60 + rhs.hour * 3600);
+        date = date + Duration::nanoseconds(rhs.nanos);
         date
     }
 }
@@ -154,6 +253,7 @@ impl<Tz: TimeZone> Sub<&IsoDuration> for DateTime<Tz> {
             date = date + Days::new(-rhs.day as u64);
         }
         date = date - Duration::seconds(rhs.second + rhs.minute * 60 + rhs.hour * 3600);
+        date = date - Duration::nanoseconds(rhs.nanos);
         date
     }
 }
@@ -181,6 +281,24 @@ fn parse_datetime(i: &str) -> IResult<&str, DateTime<FixedOffset>> {
     })(i)
 }
 
+fn parse_seconds(i: &str) -> IResult<&str, (i64, i64)> {
+    let (residue, (sign, sec_str, ns_str, _exp)) = recognize_float_parts(i)?;
+    let mut sec = sec_str.parse::<i64>().unwrap_or_default();
+    if !sign {
+        sec = -sec;
+    };
+    if ns_str.len() > 0 {
+        let ns = (ns_str.to_string() + "000000000")[..9]
+            .parse::<u32>()
+            .unwrap_or_default();
+        return Ok((
+            residue,
+            (sec, (if sign { ns as i64 } else { -(ns as i64) })),
+        ));
+    }
+    return Ok((residue, (sec, 0)));
+}
+
 fn parse_duration(i: &str) -> IResult<&str, IsoDuration> {
     let (i, (year, month, day)) = preceded(
         char('P'),
@@ -191,14 +309,14 @@ fn parse_duration(i: &str) -> IResult<&str, IsoDuration> {
         )),
     )(i)?;
 
-    let (i, (hour, minute, second)) = or_default(
-        (0, 0, 0),
+    let (i, (hour, minute, (second, nanos))) = or_default(
+        (0, 0, (0, 0)),
         preceded(
             char('T'),
             tuple((
                 or_default(0, terminated(parse_i64, char('H'))),
                 or_default(0, terminated(parse_i64, char('M'))),
-                or_default(0, terminated(parse_i64, char('S'))),
+                or_default((0, 0), terminated(parse_seconds, char('S'))),
             )),
         ),
     )(i)?;
@@ -212,6 +330,7 @@ fn parse_duration(i: &str) -> IResult<&str, IsoDuration> {
             hour,
             minute,
             second,
+            nanos: if second < 0 { -nanos } else { nanos },
         },
     ))
 }
@@ -237,9 +356,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::error::Error;
     use chrono::{Datelike, Timelike};
-
-    use crate::IsoInterval;
+    use rstest::rstest;
 
     #[test]
     fn interval_form1() {
@@ -309,5 +429,57 @@ mod tests {
         assert_eq!(interval2.to.hour(), 15);
         assert_eq!(interval2.to.minute(), 30);
         assert_eq!(interval2.to.second(), 00);
+    }
+
+    #[rstest]
+    #[case("2007-03-01T13:00:00Z/P1Y2M10DT2H30M", 0, 0)]
+    #[case("2007-03-01T13:00:00Z/P1Y2M10DT2H30M10S", 10, 0)]
+    #[case("2007-03-01T13:00:00Z/P1Y2M10DT2H30M10.304S", 10, 304_000_000)]
+    #[case("2007-03-01T13:00:00Z/PT-3H+10.304S", 10, 304_000_000)]
+    #[case("2007-03-01T13:00:00Z/PT3H-10.304S", 50, 304_000_000)]
+    // neg sec in duration borrows from the end dt minute as needed
+    // bugbug: ns portion should be negative!
+    #[case("2007-03-01T13:00:00Z/PT0.000000304S", 0, 304)]
+    #[case("2007-03-01T13:00:00Z/PT0.0000304S", 0, 30400)]
+
+    fn sec_ns(#[case] instr: &str, #[case] exp_sec: u32, #[case] exp_ns: u32) {
+        let obs_dur: IsoInterval<_> = instr.parse().unwrap();
+        assert_eq!(exp_sec, obs_dur.to.second(), "exp sec != obs sec");
+        assert_eq!(exp_ns, obs_dur.to.nanosecond(), "exp ns != obs ns");
+    }
+
+    #[rstest]
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 0, 0), "PT0S")]
+    #[case(IsoDuration::new(0,0,-3,0,0,0,0), "P-3D")]
+    #[case(IsoDuration::new(2023, 12, 11, 0, 0, 0, 0), "P2023Y12M11D")] // don't display HMS if not non-zero
+    #[case(IsoDuration::new(-1, -2, -3, -4, -5, -6, -7), "P-1Y-2M-3DT-4H-5M-6.000000007S")]
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 1, 0), "PT1S")] // no nanoseconds if they're zero
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, -1, 0), "PT-1S")] // no nanoseconds if they're zero (negative)
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 1, 1), "PT1.000000001S")] // try all the nanosecond display edge cases
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 1, -1), "PT0.999999999S")]
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, -1, 1), "PT-0.999999999S")] //x
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, -1, -1), "PT-1.000000001S")]
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 0, -1), "PT-0.000000001S")] //x
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, -2, 1), "PT-1.999999999S")]
+    #[case(IsoDuration::new(0, 0, 0, 0, 0, 2, -1), "PT1.999999999S")]
+
+    fn display_iso_duration(#[case] in_dur: IsoDuration, #[case] expect: &str) {
+        assert_eq!(expect, &in_dur.to_string(), "expected :: observed");
+    }
+
+    #[rstest]
+    #[case("2020-01-01T00:00:00Z", &IsoDuration::new(0,0,0,0,0,0,1), "2020-01-01T00:00:00.000000001Z")]
+    #[case("2020-01-01T00:00:00Z", &IsoDuration::new(0,0,0,0,0,0,1_000_000_000 + 1), "2020-01-01T00:00:01.000000001Z")] // nanoseconds carries to seconds as needed
+
+    fn dt_add_duration(
+        #[case] start: &str,
+        #[case] addend: &IsoDuration,
+        #[case] exp: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let start_dt = DateTime::parse_from_rfc3339(start)?;
+        let exp_dt = DateTime::parse_from_rfc3339(exp)?;
+        assert_eq!(start_dt + addend, exp_dt);
+
+        Ok(())
     }
 }
